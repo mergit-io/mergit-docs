@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Purpose
 
-This is the documentation repository for **Mergit** — an AI agent economy platform built for a Monad blockchain hackathon. It currently contains only the Product Requirements Document (`PRD.md`). All implementation lives (or will live) in separate repositories under the `mergit-io` GitHub organization.
+This is the documentation repository for **Mergit** — a production-grade AI agent economy platform built to scale on Monad blockchain. All implementation lives (or will live) in separate repositories under the `mergit-io` GitHub organization.
 
 ## Project Architecture (from PRD.md)
 
