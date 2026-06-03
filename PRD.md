@@ -1,9 +1,9 @@
 # Mergit — Product Requirements Document
 
-**Version:** 0.1.0-draft  
+**Version:** 0.2.0-draft  
 **Organization:** [mergit-io](https://github.com/mergit-io)  
 **Status:** Planning  
-**Last Updated:** 2026-06-02  
+**Last Updated:** 2026-06-03  
 
 ---
 
@@ -46,9 +46,9 @@ Mergit upgrades the traditional AI agent loop — "receive goal → plan → exe
 
 Mergit is a full-scale rebuild of an internal prototype called **omniBox** — a Python/FastAPI + SQLite agent orchestrator that proved the core execution model (multi-agent DAG execution, GitHub automation, LLM-driven task decomposition). omniBox had no blockchain layer, no identity system, no caching strategy, and no reputation mechanism. Mergit takes the validated execution model and re-architects it at production scale with Rust-primary services, a LangGraph orchestration engine, and a Monad on-chain layer.
 
-### 1.4 Hackathon Context
+### 1.4 Initial Deployment Context
 
-Mergit is being built for a **Monad hackathon** with the theme: *give agents identity, ownership, proof, coordination, and reputation — agents should be more than tool executors*. Post-hackathon, Mergit continues as a fully productized platform.
+Mergit launches on the Monad blockchain with the theme: *give agents identity, ownership, proof, coordination, and reputation — agents should be more than tool executors*. All architectural decisions are made for production scale. Launch constraints (Docker Compose instead of Kubernetes, HMAC instead of mTLS for internal auth in Phases 1–4) are documented in prd-hackathon.md and will be replaced in Phase 5. The launch event is the starting line, not the finish line.
 
 ---
 
@@ -56,7 +56,7 @@ Mergit is being built for a **Monad hackathon** with the theme: *give agents ide
 
 ### 2.1 The Gap in Current AI Agent Platforms
 
-Existing AI agent frameworks (AutoGPT, CrewAI, LangChain agents, omniBox) solve agent *execution* but leave three fundamental problems unsolved:
+Existing AI agent frameworks (AutoGPT, CrewAI, LangChain agents, omniBox) solve agent *execution* but leave four fundamental problems unsolved:
 
 **Problem 1 — No Verifiability**  
 When an agent claims it created a PR, reviewed code, or completed a task, there is no cryptographic proof. The output is only as trustworthy as the infrastructure that generated it. No third party can independently verify that specific work was done by a specific agent at a specific time.
@@ -67,6 +67,9 @@ Agents are ephemeral. Every run spawns a stateless executor with no identity, no
 **Problem 3 — No Reputation or Accountability**  
 Because agents have no identity and their work is unverified, there is no basis for reputation. Users cannot choose "a trusted agent" over "an untested agent." Bad agents (high failure rate, incorrect outputs, hallucinated tool calls) are indistinguishable from good ones.
 
+**Problem 4 — No Economic Accountability**  
+Agents face no financial consequence for low-quality, harmful, or fraudulent work. Without skin in the game, an agent that destroys a production database costs its operator nothing beyond a restart. Bad actors can re-register under a new DID and immediately resume operating. There is no mechanism for slashing dishonest agents or rewarding consistently reliable ones with economic incentives. Reputation scores alone cannot sustain trust at scale when the cost of abandoning a tarnished identity is zero.
+
 ### 2.2 What Mergit Solves
 
 | Problem | Mergit Solution |
@@ -74,6 +77,7 @@ Because agents have no identity and their work is unverified, there is no basis 
 | No verifiability | Every completed task records a `resultHash` on-chain via `ProofOfWork.sol` — tamper-proof, auditable by any observer |
 | No persistent identity | Every agent receives a W3C DID (`did:mergit:<uuid>`) and an ERC-721 soulbound NFT (`AgentPassport.sol`) encoding its capability hash, task stats, and registration timestamp |
 | No reputation | `ReputationRegistry.sol` maintains a live on-chain composite score per agent, updated by an oracle after each proof batch; scores are verifiable against off-chain computation receipts |
+| No economic accountability | StakeRegistry.sol requires agents to post MON stake before accepting high-risk tasks; verified fraud triggers automated stake slashing via ChallengeManager.sol; honest challengers are rewarded |
 
 ---
 
@@ -83,7 +87,7 @@ Because agents have no identity and their work is unverified, there is no basis 
 
 | Phase | Goal | Success Metric |
 |-------|------|---------------|
-| Phase 0 | Monorepo foundation and dev environment | `docker compose up` brings up all 5 services + PG + Redis with no errors; CI pipelines pass on empty scaffold |
+| Phase 0 | Monorepo foundation and dev environment | `docker compose up` brings up all 4 services (api-gateway, orchestration, accounts-service, blockchain-indexer) + PG + Redis with no errors; CI pipelines pass on empty scaffold |
 | Phase 1 | Core agent execution with LangGraph | End-to-end goal execution: submit "create a PR for X" → agents decompose, execute, return result; <30s planning latency |
 | Phase 2 | On-chain identity + proof of work | Every completed goal records a proof on Monad testnet within 60 seconds of completion; identity NFT minted on agent registration |
 | Phase 3 | Reputation scoring | Reputation scores update on-chain within 10 minutes of batch window; badge issued for 5 consecutive successful proofs |
@@ -111,6 +115,7 @@ Because agents have no identity and their work is unverified, there is no basis 
 - See exactly what the agent did at each step (tool calls, reasoning, outputs)
 - Approve PRs and credential requests without leaving the Mergit UI
 - Trust that the agent result is genuine (on-chain proof link as evidence)
+- Structured execution traces showing tool names, inputs (redacted), outputs (truncated), timing, and approval records — not raw LLM reasoning
 
 **Pain point with current tools:** Existing agents hallucinate tool calls and produce unverifiable outputs. No audit trail.
 
@@ -155,6 +160,9 @@ Users submit a natural-language goal. The orchestration engine (LangGraph) decom
 | Coder | Code generation, debugging, Python execution in sandboxed environment | Claude Sonnet (Anthropic) |
 | Integrator | GitHub operations: PR creation, branch management, issue handling, commenting | LLaMA 3.3 70B (Groq) |
 
+**Agent Context Management**
+Agents are not recreated from scratch on every goal. Base context (role prompt, capability set, tool catalog) is loaded once per agent instance and cached in-process with a 5-minute TTL. Goal-specific context (goal description, task inputs, retrieved memories) is injected per execution. Agents are refreshed only when their capability set changes or the context TTL expires, eliminating cold-start overhead per goal.
+
 **Parallel Execution**  
 Tasks with no unmet dependencies execute in parallel via LangGraph's `Send` API. The orchestrator continuously identifies ready tasks as dependencies resolve.
 
@@ -178,7 +186,7 @@ Consecutive failures across tasks trigger an automatic issue-filing and fix-spaw
 | `wait_webhook` | Integration | Block task until a webhook event arrives |
 | `credential_request` | Human-in-loop | Request human to provide credentials (triggers UI interrupt) |
 
-All tools are implemented as **FastAPI tool-server sidecars** in Python. Rust services call tool servers via HTTP. LangGraph nodes call tool servers via `httpx.AsyncClient`. Every tool call is capability-verified by the identity service via gRPC before execution.
+All tools are implemented as **FastAPI tool-server sidecars** in Python. Rust services call tool servers via HTTP. LangGraph nodes call tool servers via `httpx.AsyncClient`. Every tool call is capability-verified locally by the tool server using the capability JWT provided by orchestration — no per-call network round-trip to the identity service. Tool call logs (tool name, invocation time, duration, args hash, result preview, status) are generated exclusively by the orchestration backend. The LLM issues a tool call request; the backend records the actual invocation. Raw LLM reasoning is never written to audit records.
 
 ### 5.3 Agent Identity and Passport
 
@@ -197,32 +205,27 @@ Simultaneously with DID registration, the identity service mints an ERC-721 soul
 
 ### 5.4 Proof of Work
 
-**On-Chain Proof Recording**  
-On every completed task, the `proof_node` in LangGraph calls the `blockchain-indexer` service via gRPC. The indexer:
-1. Computes `resultHash = SHA-256(output_json)`
-2. Computes `taskId = SHA-256(task_params_json)` as the idempotency key
-3. Calls `ProofOfWork.sol::recordProof(taskId, goalId, agentAddress, resultHash)` on Monad
-4. Returns the transaction hash
-5. The transaction hash is stored in PostgreSQL and displayed in the frontend as a block explorer link
+**Non-Blocking Proof Submission**
+Proof submission does not block goal completion. On task completion, enqueue_proofs_node performs a non-blocking Redis XADD to stream:proof_queue and immediately proceeds to finalize. A dedicated proof-worker process in blockchain-indexer drains stream:proof_queue and submits proofs on-chain. This means goal.completed fires within <1s of all tasks finishing, regardless of Monad block confirmation time.
 
-**Proof Idempotency**  
-`recordProof` is idempotent on `taskId` — recording the same task twice is a no-op. This prevents double-counting from retry logic or network failures.
+**Proof Bundle (Per-Goal Merkle Batching)**
+The proof-worker collects all task proof entries for a goal, builds a Merkle tree (each leaf = SHA-256(task_id + result_json)), and calls ProofOfWork.sol::recordBundle(bundleId, goalId, merkleRoot, taskCount) once per goal. Individual task hashes are stored in PostgreSQL. Anyone can verify by recomputing the Merkle tree from the PostgreSQL records and comparing the root to the on-chain event.
 
-**Proof Verification**  
-Any observer can independently verify a proof by:
-1. Reading `ProofOfWork.sol::proofs[taskId]` to get the `resultHash`
-2. Fetching the task output JSON from the Mergit API or PostgreSQL export
-3. Computing `SHA-256(output_json)` and comparing to the on-chain `resultHash`
+**Proof Durability (Outbox Pattern)**
+Before XADDing to stream:proof_queue, enqueue_proofs_node writes a proof_outbox record (task_id, goal_id, agent_address, result_hash, status=pending, attempts=0) to PostgreSQL. The proof-worker updates status to submitted on broadcast and confirmed on receipt. Records stuck in pending for >60s are retried with exponential backoff (1s, 2s, 4s, 8s…). After 10 failed attempts: status=dead_lettered + alert fired.
+
+**Proof Idempotency**
+recordBundle is idempotent on bundleId — recording the same bundle twice is a no-op. This prevents double-counting from retry logic, indexer restarts, or Monad reorgs.
 
 ### 5.5 Reputation System
 
 **Composite Score Formula**  
 ```
-score = (tasks_completed_rate * 0.40)
-      + (pr_merged_rate       * 0.30)
-      + (response_time_score  * 0.10)
-      + (peer_review_score    * 0.10)
-      + (badge_count_score    * 0.10)
+score = (tasks_completed_rate  * 0.35)
+      + (pr_merged_rate         * 0.25)
+      + (human_approval_rate    * 0.15)
+      + (quality_signal         * 0.15)
+      + (badge_count_score      * 0.10)
 ```
 Scaled to 0–10000 (e.g., 9850 = 98.50%).
 
@@ -231,8 +234,8 @@ Scaled to 0–10000 (e.g., 9850 = 98.50%).
 |-----------|-----------|
 | `tasks_completed_rate` | `tasks_completed / tasks_attempted` (rolling 30-day window) |
 | `pr_merged_rate` | Fraction of PRs created by the agent that were merged (not closed) |
-| `response_time_score` | Inverse of average task duration, normalized to fleet baseline |
-| `peer_review_score` | Average human approval rate on interrupt decisions (approvals / total interrupts) |
+| `human_approval_rate` | Average human approval rate on interrupt decisions (approvals / total interrupts) |
+| `quality_signal` | 1 - (failed_rate * 0.4 + rollback_rate * 0.3 + security_issue_rate * 0.2 + revocation_rate * 0.1); ranges 0–1 |
 | `badge_count_score` | Logarithmically scaled count of earned badges |
 
 **On-Chain Score Update**  
@@ -243,8 +246,8 @@ The `componentHash` binds the on-chain integer to an off-chain JSON breakdown. A
 **Verified Run Badge**  
 After 5 consecutive successful task proofs (no failures, no replanning), the reputation service triggers badge issuance. Badges are metadata extensions on `AgentPassport.sol` (or a separate `Badges.sol` — TBD in Phase 3). A "Verified Run" badge is on-chain, visible in the frontend, and counted in the reputation score.
 
-**Leaderboard**  
-Redis sorted set `leaderboard:global` is updated in real time as scores change. The frontend queries the top-N agents via the reputation service's REST API. Score history is stored in PostgreSQL (partitioned table, queryable by agent and date range).
+**Agent Discovery**
+The leaderboard is a secondary discovery surface, accessible at /discover. The primary reputation UI is the per-agent passport card. The Redis sorted set leaderboard:global is updated in real time as scores change; the top-N view is served directly from the ZSET. The enriched/paginated view (joined with passport metadata) is cached with a 30s TTL and busted on each score write. Score history is stored in PostgreSQL (partitioned table, queryable by agent and date range).
 
 ### 5.6 Real-Time Event Streaming
 
@@ -256,6 +259,7 @@ Every state change in a goal or task is published to Redis Streams. The `api-gat
 - `task.failed` — task failed with error
 - `goal.completed` — all tasks done
 - `proof.submitted` — on-chain proof tx hash available
+- `proof.pending` — proofs enqueued to stream:proof_queue, chain submission in progress ("verifying on Monad…")
 - `proof.confirmed` — transaction mined on Monad
 - `reputation.updated` — agent score changed
 - `badge.issued` — new badge minted on-chain
@@ -272,7 +276,26 @@ LangGraph's `interrupt()` primitive pauses graph execution and surfaces an appro
 | `replan_count > 2` | Current state, failure history | Provide guidance or Cancel goal |
 | `code_exec` detects harmful pattern | Code snippet, detection reason | Allow / Block |
 
+**Capability Gate for Supervised Tasks**
+For tasks flagged human_supervised: true in the task spec, the interrupt prompt is shown regardless of whether the capability JWT permits the action. The human approval is treated as a runtime capability grant. This acts as a second capability layer for sensitive operations — JWT grants are necessary but not sufficient for supervised tasks.
+
 The UI displays an approval modal when an `interrupt.pending` SSE event arrives. The user submits their decision via `POST /goals/{goal_id}/resume`. The gateway relays this to the orchestration service, which resumes the LangGraph thread via `Command(resume={decision})`.
+
+### 5.8 Agent Economy
+
+**Staking for Trust Tiering**
+Before accepting high-risk tasks (github_pr writes, code_exec with external network access, credential_request), agents must post a minimum MON stake in StakeRegistry.sol. Stake amount is tiered by task risk level. Higher stake = access to higher-risk tool scopes.
+
+**Slash Conditions**
+Verified fraud (proof hash mismatch, fabricated tool results) triggers automated stake slashing via ChallengeManager.sol. Any observer can file a challenge by posting a counter-proof. If the challenge succeeds, the dishonest agent's stake is slashed and a portion rewarded to the challenger. Slash governance is reviewed by a Gnosis Safe 2-of-3 before execution.
+
+**Economic Incentives Tied to Reputation**
+Reputation score directly gates which tasks an agent can bid on. High-score agents access premium task queues. Low-score agents are restricted to supervised (human-approved) tasks until their score recovers.
+
+**Contracts (Phase 2+)**
+- StakeRegistry.sol — records agent stake, enforces minimums per risk tier
+- ChallengeManager.sol — challenge filing, evidence submission, slashing execution
+- TaskEscrow.sol (Phase 3+) — holds payer funds until proof verification; releases to agent on confirmed proof
 
 ---
 
@@ -290,32 +313,35 @@ The UI displays an approval modal when an `interrupt.pending` SSE event arrives.
 ┌──────────────────────────────────▼───────────────────────────────────────┐
 │                        api-gateway  (Rust / Axum 0.7)                    │
 │         JWT Auth · Rate Limiting (Redis) · SSE Multiplex · Routing       │
-│                    mTLS termination for internal traffic                  │
-└──────────┬──────────────────┬────────────────────┬────────────────────────┘
-           │ REST/gRPC        │ REST/gRPC           │ REST/gRPC
-           ▼                  ▼                     ▼
-┌──────────────────┐  ┌────────────────────┐  ┌────────────────────────────┐
-│  orchestration   │  │  identity          │  │  reputation                │
-│  Python/LangGraph│  │  Rust/Axum + alloy │  │  Rust/Axum                 │
-│  + tool-servers  │  │  DID · NFT · Caps  │  │  Scoring · Badges · Board  │
-└────────┬─────────┘  └─────────┬──────────┘  └────────────┬───────────────┘
-         │ gRPC                 │ gRPC                      │ gRPC
-         └──────────────────────┴────────────────────────────┘
-                                │
-                ┌───────────────▼────────────────┐
-                │   blockchain-indexer  (Rust)    │
-                │   alloy-rs · WS Event Sub       │
-                │   Oracle Signing · TX Retry     │
-                │   PostgreSQL sink · Redis cache │
-                └───────────────┬────────────────┘
-                                │ JSON-RPC / WSS
-                ┌───────────────▼────────────────┐
-                │        Monad Blockchain         │
-                │  AgentPassport.sol              │
-                │  ProofOfWork.sol                │
-                │  ReputationRegistry.sol         │
-                │  AuditTrail.sol                 │
-                └─────────────────────────────────┘
+│              HMAC-authed internal traffic; mTLS in Phase 5               │
+└──────────┬──────────────────┬────────────────────────────────────────────┘
+           │ REST/gRPC        │ HTTP REST
+           ▼                  ▼
+┌──────────────────┐  ┌─────────────────────────────┐
+│  orchestration   │  │  accounts-service           │
+│  Python/LangGraph│  │  Python / FastAPI           │
+│  + tool-servers  │  │  identity module:           │
+│                  │  │  DID · NFT · Caps           │
+│                  │  │  reputation module:         │
+│                  │  │  Scoring · Badges           │
+└────────┬─────────┘  └─────────────┬───────────────┘
+         │ Redis Stream             │ gRPC
+         └──────────────────────────┘
+                        │
+        ┌───────────────▼────────────────┐
+        │   blockchain-indexer  (Rust)   │
+        │   alloy-rs · WS Event Sub      │
+        │   Oracle Signing · TX Retry    │
+        │   PostgreSQL sink · Redis cache│
+        └───────────────┬────────────────┘
+                        │ JSON-RPC / WSS
+        ┌───────────────▼────────────────┐
+        │        Monad Blockchain         │
+        │  AgentPassport.sol              │
+        │  ProofOfWork.sol                │
+        │  ReputationRegistry.sol         │
+        │  AuditTrail.sol                 │
+        └─────────────────────────────────┘
 
                  Data Layer (shared, private network)
 ┌──────────────────────────────────────────────────────────────┐
@@ -331,17 +357,17 @@ The UI displays an approval modal when an `interrupt.pending` SSE event arrives.
 |-----------|----------|--------------|
 | Frontend → api-gateway | HTTPS REST + SSE + WSS | Standard web; SSE for streaming events |
 | api-gateway → orchestration | HTTP REST | Goal CRUD and interrupt/resume |
-| api-gateway → identity | gRPC | Low-latency capability checks on every request |
-| api-gateway → reputation | HTTP REST | Score and leaderboard reads |
-| orchestration → identity | gRPC | `VerifyCapability` on every tool call invocation |
-| orchestration → blockchain-indexer | gRPC | `SubmitProof` after task completion |
-| reputation → blockchain-indexer | gRPC | `UpdateScore` relay to oracle signing key |
+| api-gateway → accounts-service | HTTP REST | Capability JWT local verification; only admin/registration calls go to accounts-service |
+| orchestration → accounts-service | HTTP REST | Agent registration and JWT refresh only; capability checks are local JWT verification |
+| orchestration → blockchain-indexer | Redis Stream (`stream:proof_queue`) | Non-blocking enqueue; proof-worker drains asynchronously |
+| accounts-service → blockchain-indexer | gRPC | UpdateScore relay to oracle signing key (kept as gRPC: batch job, low-freq, Protobuf encoding justified) |
+| tool-server → accounts-service | None (local JWT verify) | Capability JWT verified locally; no network call per tool invocation |
 | blockchain-indexer → Monad | JSON-RPC (WS) | Event subscription + transaction submission |
 | All services → PostgreSQL | `sqlx` async pool (TCP) | Via pgBouncer |
 | All services → Redis | `redis` crate / `redis-py` (TCP) | Cache reads/writes, pub/sub |
 
-**Why gRPC for internal services?**  
-gRPC provides: (1) Protobuf-typed contracts prevent runtime deserialization mismatches; (2) bidirectional streaming for event subscriptions; (3) binary encoding reduces payload size ~50% vs JSON; (4) HTTP/2 multiplexing allows multiple concurrent RPCs over one connection. The overhead of proto compilation is worthwhile for services that communicate thousands of times per hour.
+**Internal Auth (Phases 1–4)**
+All internal service-to-service calls include an `X-Internal-Auth: hex(hmac_sha256(service_secret, request_body))` header. The Docker private network prevents external spoofing; HMAC prevents in-network spoofing. mTLS replaces HMAC in Phase 5 when Kubernetes cert-manager is available.
 
 ---
 
@@ -372,8 +398,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 - WebSocket upgrade for bidirectional agent event streams (Phase 4+)
 - Request ID injection (`X-Request-ID` header, propagated to all downstream calls)
 - OpenTelemetry trace context propagation (W3C `traceparent` header)
-- mTLS between gateway and internal services (client certificate required for internal network access)
-- In-process `moka` cache for JWT public keys (5m TTL) and capability lookup cache (60s TTL)
+- X-Internal-Auth HMAC header on all outbound internal calls (Phases 1–4); mTLS in Phase 5
+- In-process `moka` cache for user JWT public keys (5m TTL) and accounts-service signing key (5m TTL)
 
 **Endpoints exposed**
 
@@ -386,11 +412,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 | POST | `/goals/{id}/resume` | orchestration (interrupt resume) |
 | GET | `/stream/goals/{id}` | Redis Streams → SSE |
 | GET | `/stream/agents/{id}` | Redis Streams → SSE |
-| GET | `/agents/{id}` | identity |
-| POST | `/agents` | identity (register) |
-| GET | `/agents/{id}/passport` | identity (NFT metadata) |
-| GET | `/reputation/leaderboard` | reputation |
-| GET | `/reputation/agents/{id}` | reputation |
+| GET | `/agents/{id}` | accounts-service |
+| POST | `/agents` | accounts-service (register) |
+| GET | `/agents/{id}/passport` | accounts-service (NFT metadata) |
+| GET | `/reputation/leaderboard` | accounts-service |
+| GET | `/reputation/agents/{id}` | accounts-service |
 | GET | `/proofs/{task_id}` | blockchain-indexer |
 | GET | `/health` | local health check |
 | POST | `/auth/login` | local OAuth flow |
@@ -431,62 +457,86 @@ Three independent FastAPI services, each in its own Docker container:
 
 Each tool server:
 1. Receives tool call from orchestration via `POST /execute` with `{tool, args, agent_id}`
-2. Calls identity service gRPC `VerifyCapability(agent_id, tool_name)` — rejects if false
+2. Verifies the capability JWT from the request header: decodes HS256, checks `capabilities[]` claim includes `tool_name` and action scope, checks `exp`, checks `cap:revoked:{agent_id}` Redis key
 3. Checks Redis tool output cache: key = `tool:{name}:{sha256(args)}` — returns cache hit if valid
 4. Executes tool, writes result to Redis cache (tool-specific TTL), returns result
-5. Logs action to AuditTrail via blockchain-indexer gRPC `LogAction`
+5. Appends action to Redis Stream `stream:audit_buffer` (non-blocking XADD): fields = `{agent_id, action_type, tool_name, args_hash, task_id, timestamp}`
 
 **LLM Provider Strategy (LiteLLM)**  
 Primary fallback chain: `groq/llama-4-maverick` → `groq/llama-3.3-70b` → `anthropic/claude-sonnet-4-6` → `openai/gpt-4o`  
 Redis tracks provider health: consecutive error count, rate limit windows, last-success timestamp. LiteLLM checks Redis before routing.
 
+**Horizontal Scaling**
+Each tool server is deployed with `deploy.replicas: 3` in Docker Compose. DNS round-robin distributes requests across replicas, preventing single-replica saturation under LangGraph Send API parallel fan-out. Promoted to HPA-managed Kubernetes Deployment in Phase 5.
+
 ---
 
-### 7.3 identity (Rust / Axum + alloy)
+### 7.3 accounts-service (Python / FastAPI)
 
-**Purpose:** Manages agent identities, DIDs, capabilities, and on-chain passport NFTs.
+**Purpose:** Unified service handling agent identity (DID registration, NFT minting delegation, capability management) and reputation (score computation, badge engine, leaderboard). Two modules, one process, one Dockerfile.
 
-**Key Rust Crates**
+**Key Python Packages**
 ```toml
-axum = "0.7"
-sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"] }
-alloy = { version = "1", features = ["providers", "signers", "sol-types", "contract", "transports-http"] }
-tonic = "0.12"               # gRPC server
-ed25519-dalek = "2"          # DID key generation
-sha2 = "0.10"                # SHA-256 for capability hash
-uuid = { version = "1", features = ["v4", "serde"] }
-serde = { version = "1", features = ["derive"] }
-moka = { version = "0.12", features = ["future"] }  # capability cache
+fastapi = ">=0.111"
+uvicorn = { extras = ["standard"] }
+sqlalchemy = { extras = ["asyncio"] }
+asyncpg = ">=0.29"
+httpx = ">=0.27"
+pydantic = ">=2.7"
+python-jose = { extras = ["cryptography"] }  # JWT HS256
+cryptography = ">=42"                         # Ed25519 keypair
+redis = { extras = ["hiredis"] }
+moka-py = ">=0.1"                             # in-process cache (or use functools.lru_cache + asyncio lock)
 ```
 
-**gRPC Service Interface**
-```proto
-service IdentityService {
-  rpc VerifyCapability(CapabilityRequest) returns (CapabilityResponse);
-  rpc GetAgentInfo(AgentRequest) returns (AgentInfo);
-  rpc RegisterAgent(RegisterRequest) returns (RegisterResponse);
-}
-
-message CapabilityRequest {
-  string agent_id = 1;
-  string tool_name = 2;
-}
-
-message CapabilityResponse {
-  bool allowed = 1;
-  string reason = 2;
-}
-```
-
-**Agent Registration Flow**
-1. `POST /agents` received by api-gateway → forwarded to identity service
-2. Identity service generates UUIDv4, derives `did:mergit:{uuid}`
-3. Generates Ed25519 keypair (stored encrypted in PostgreSQL, private key never leaves service)
+**Identity Module — Agent Registration Flow**
+1. `POST /agents` received by api-gateway → forwarded to accounts-service
+2. Generates UUIDv4, derives `did:mergit:{uuid}`
+3. Generates Ed25519 keypair (stored encrypted in PostgreSQL via cryptography library; private key never leaves service)
 4. Computes `capabilityHash = SHA-256(capabilities_json)`
-5. Calls `AgentPassport.sol::mintPassport(agentAddress, capabilityHash)` via alloy → gets `tokenId`
-6. Stores DID, keypair reference, capabilities, tokenId in PostgreSQL
-7. Writes `agent_id → capabilities` to moka cache (60s TTL)
-8. Returns `{agent_id, did, token_id, tx_hash}`
+5. Calls blockchain-indexer HTTP `POST /mint-passport {agentAddress, capabilityHash}` → gets `tokenId` (blockchain-indexer holds the alloy client; accounts-service has no chain client)
+6. **Issues capability JWT** (HS256, TTL=5min, claims=`{agent_id, capabilities[], exp}`) signed with accounts-service signing key
+7. Stores DID, keypair reference, capabilities, tokenId in PostgreSQL
+8. Writes `agent_id → capabilities` to in-process cache (60s TTL) and Redis (5m TTL)
+9. Returns `{agent_id, did, token_id, tx_hash, capability_jwt}`
+
+Orchestration caches the `capability_jwt` and proactively refreshes it 30 seconds before expiry.
+
+**Capability JWT Verification (Tool Servers)**
+Tool servers verify the JWT locally:
+1. Decode HS256 JWT using accounts-service public key (cached in moka, refreshed every 5m)
+2. Check `capabilities[]` claim includes the requested `tool_name` and action scope
+3. Check `exp` — reject if expired
+4. Check `cap:revoked:{agent_id}` Redis key — if set, reject immediately (near-instant revocation within TTL)  
+No network call to accounts-service per tool invocation.
+
+**Reputation Module — Score Batch Job (every 10 minutes)**
+```
+1. SELECT agents with proofs since last_computed_at
+2. For each agent:
+   a. Fetch proof records from PostgreSQL (30-day window)
+   b. Fetch PR merge data from PostgreSQL tool_results
+   c. Compute 5 component scores (including quality_signal negative components)
+   d. Compute composite = weighted sum * 10000
+   e. Compute componentHash = SHA-256(component_json)
+   f. Call blockchain-indexer gRPC UpdateScore(agent_address, composite, componentHash)
+   g. Insert into reputation_snapshots (partitioned table)
+   h. Update Redis sorted set ZADD leaderboard:global composite agent_id
+3. Log batch stats (agents updated, avg score change, max delta)
+```
+
+**Badge Engine**
+- "Verified Run" badge: triggered when `consecutive_successes >= 5`
+- Badge issuance calls blockchain-indexer to update `AgentPassport.sol` badge metadata
+- Stored in PostgreSQL `badges(agent_id, badge_type, issued_at, tx_hash)`
+
+**Redis Read-Through Cache**
+- `agent:status:{agent_id}` HASH with TTL=30s (miss path reads PostgreSQL)
+- In-process cache (TTL=60s) sits in front of Redis for hottest lookups
+- `cap:revoked:{agent_id}` pub/sub channel for near-instant JWT revocation
+
+**Checkpointer Note**
+AsyncPostgresSaver uses a dedicated PostgreSQL connection pool (separate from the general app pool) to prevent checkpoint burst writes from starving application queries.
 
 ---
 
@@ -554,38 +604,8 @@ For each event:
 
 ---
 
-### 7.5 reputation (Rust / Axum)
-
-**Purpose:** Computes composite reputation scores, manages badges, maintains leaderboard.
-
-**Key Rust Crates**
-```toml
-axum = "0.7"
-sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"] }
-tonic = "0.12"      # gRPC client (calls blockchain-indexer)
-redis = "0.25"      # sorted set for leaderboard
-tokio = "1"
-```
-
-**Score Batch Job (runs every 10 minutes via tokio interval)**
-```
-1. SELECT agents with proofs since last_computed_at
-2. For each agent:
-   a. Fetch proof records from PostgreSQL (30-day window)
-   b. Fetch PR merge data from PostgreSQL tool_results
-   c. Compute 5 component scores
-   d. Compute composite = weighted sum * 10000
-   e. Compute componentHash = SHA-256(component_json)
-   f. Call blockchain-indexer gRPC UpdateScore(agent_address, composite, componentHash)
-   g. Insert into reputation_snapshots (partitioned table)
-   h. Update Redis sorted set ZADD leaderboard:global composite agent_id
-3. Log batch stats (agents updated, avg score change, max delta)
-```
-
-**Badge Engine**
-- "Verified Run" badge: triggered when `consecutive_successes >= 5` (no failures or replannings in last 5 completed proofs)
-- Badge issuance calls identity service to update `AgentPassport.sol` badge metadata
-- Stored in PostgreSQL `badges(agent_id, badge_type, issued_at, tx_hash)`
+### 7.5 reputation (merged into accounts-service)
+The reputation module is part of accounts-service (§7.3). This section is intentionally blank. The service will be promoted to a standalone Rust binary in Phase 5 if reputation compute starts contending with identity request handling.
 
 ---
 
@@ -825,70 +845,140 @@ leaderboard:global                      ZSET
 stream:goal:{goal_id}                   STREAM
 stream:agent:{agent_id}                 STREAM
 stream:onchain_events                   STREAM  (consumer group: reputation, frontend-fanout)
+stream:proof_queue                      STREAM  Consumer group: proof-worker. XADD fields: task_id, goal_id, agent_address, result_hash, bundle_id
+stream:audit_buffer                     STREAM  Consumer group: audit-batcher. XADD fields: agent_id, action_type, tool_name, args_hash, task_id, timestamp
 
 # LLM provider health
 llm:provider:{provider_name}:errors     STRING (count)  TTL=60s
 llm:provider:{provider_name}:ratelimit  STRING          TTL=varies
+
+# Pub/sub channels
+cap:revoked:{agent_id}                  PUBSUB  Published when an agent's capabilities are revoked. Tool servers subscribe to invalidate cached JWT trust within seconds.
 ```
 
 ---
 
 ## 9. Caching Strategy
 
-### 9.1 Strategy Principles
+### 9.1 Cache Hierarchy
 
-1. **Never re-execute deterministic work.** If the same inputs produce the same output, cache the output indefinitely.
-2. **TTL reflects data staleness rate.** On-chain reads = 12s (block time). Search results = 1h. LLM responses = 24h.
-3. **Two-key LLM cache.** Exact hash catches byte-identical prompts cheaply. Semantic hash catches logically equivalent prompts (~40% additional hit rate).
-4. **Write-through, not write-back.** Caches are populated on miss, not pre-warmed (except the leaderboard).
-5. **Never cache side-effectful tools.** `spawn_goal`, `wait_webhook`, `credential_request` are never cached.
+Three layers, innermost wins:
 
-### 9.2 Layer Architecture
+| Layer | Technology | Scope | Eviction |
+|-------|-----------|-------|---------|
+| L1 | moka (in-process) | Per service replica | TTL + capacity |
+| L2 | Redis 7 | Cross-replica shared | TTL + explicit invalidation |
+| L3 | PostgreSQL (pgvector) | Semantic similarity | Never (query-time) |
 
+### 9.2 LLM Response Cache
+
+**Two-key strategy:**
+
+| Cache Type | Key | TTL | When to Use |
+|-----------|-----|-----|------------|
+| Exact | llm:exact:v{asset_hash}:{sha256(model+messages)} | 24h | Deterministic prompts |
+| Semantic | llm:semantic:{sha256(goal_embedding)} | 6h | Similar-but-not-identical goals |
+
+**Versioned keys (critical):** The asset_hash prefix is derived at deploy time from sha256(system_prompts + tool_definitions)[:8]. This ensures a deploy that changes a prompt immediately invalidates all cached responses without waiting for TTL. Never use a manually bumped integer — those get forgotten.
+
+**Semantic threshold:** cosine similarity > 0.97 required for a semantic hit. Roles that produce artifacts feeding real actions (Coder, Integrator) use **exact-match only, never semantic** — two goals 93% similar in embedding space can legitimately need different repos, files, or branches.
+
+**Per-role policy (safety control, not just optimization):**
+| Role | Cache Type | Max TTL | Rationale |
+|------|-----------|---------|-----------|
+| Researcher | exact + semantic | 24h | Idempotent prose, high reuse |
+| Writer | exact + semantic | 24h | Idempotent prose |
+| Coder | exact only | 12h | Artifacts feed code_exec/file_ops |
+| Integrator | exact only | 1h | Artifacts feed github_pr writes |
+
+### 9.3 Tool Output Cache
+
+Key: `tool:{name}:{sha256(canonicalized_args)}`
+
+**Canonicalization is required.** Serialize args with sorted keys and normalized whitespace before hashing — otherwise `{"a":1,"b":2}` and `{"b":2,"a":1}` are treated as different entries and miss each other.
+
+**TTL policy:**
+| Tool | TTL | Notes |
+|------|-----|-------|
+| web_search | 1h | Stale search results acceptable |
+| github_ops (read) | 5m | Repo state changes frequently |
+| code_exec | 12h | Only if sandbox is hermetic (no network, no clock) |
+| http_request GET | 5m | Respects upstream Cache-Control/ETag |
+| file_ops (read) | 2m | Workspace files change during execution |
+
+**Never-cache set (side-effectful tools):** github_pr writes, file_ops writes, spawn_goal, wait_webhook, credential_request, http_request POST/PUT/PATCH/DELETE. These are excluded unconditionally — no TTL, no bypass.
+
+### 9.4 Embedding Cache
+
+Every goal is embedded for semantic LLM cache lookup. Cache the embedding itself to avoid a redundant API round-trip before the pgvector query.
+
+Key: `emb:{model}:{dims}:{sha256(normalized_goal_text)}`  
+TTL: Indefinite (embeddings are deterministic; a model swap changes the key prefix automatically)
+
+Cost context: text-embedding-3-small costs $0.02/1M tokens — embedding cache is a latency win, not primarily a cost win.
+
+### 9.5 Anthropic Prefix Caching
+
+For calls routed to `anthropic/claude-sonnet-4-6`, set `cache_control: {type: ephemeral}` on the static system prompt prefix (tool definitions + role instructions).
+
+**Requirements to make this work:**
+- Token floor: Anthropic silently ignores the breakpoint if the prefix is < ~1024 tokens on Sonnet. Verify your tool definitions + role instructions clear this threshold.
+- Breakpoint placement: The prefix must be byte-identical across calls. Order strictly: [static tool defs][static role instructions] | BREAKPOINT | [dynamic goal + retrieved memories]. If retrieve_memories injects into the system block, it must go after the breakpoint or it busts the cache on every call.
+- Write cost is 1.25× input price; cache reads cost 0.1× input price. Net-positive only when reuse within the 5-minute provider TTL exceeds 1 call per breakpoint.
+- Provider scope: Groq has no prefix cache; OpenAI auto-caches (≥1024 tokens). This optimization only fires on the Anthropic leg of the fallback chain.
+
+**LiteLLM fallback and cache warmth:** Prefix caches are per-provider and non-portable. Every fallback to Anthropic pays the 1.25× write cost to warm a cold prefix. Implement sticky provider per task thread: Redis key `llm:thread:{task_id}:provider` (TTL = task TTL) to reduce provider flapping. Track `cache_read_input_tokens` / `cache_creation_input_tokens` in observability — these are real Anthropic API response fields that prove whether prefix caching is net-positive.
+
+### 9.6 Stampede Protection
+
+moka coalescing is per-process. With N service replicas, hot-key expiry (or a versioned-key deploy from §9.2) triggers up to N concurrent cache misses to the LLM simultaneously.
+
+**Cross-instance single-flight:** On cache miss, set a Redis distributed lock:
 ```
-Request
-  │
-  ├─► Layer 1: In-Process moka cache (Rust services)
-  │     Hit: return immediately (<1ms, no network)
-  │     Miss: proceed to Layer 2
-  │
-  ├─► Layer 2: Redis shared cache
-  │     Hit: return (<5ms, Redis round-trip)
-  │     Miss: proceed to source
-  │
-  └─► Layer 3: Source (LLM API / GitHub API / Monad RPC / PostgreSQL)
-        Result: write to Redis (and PostgreSQL for on-chain state), return
+SET lock:{cache_key} 1 NX PX 30000  (30s TTL for LLM calls)
 ```
+First requester computes and writes; others retry the read after 100ms with exponential backoff.
 
-### 9.3 LLM Response Cache Detail
+**Stale-while-revalidate:** For LLM responses, serve the slightly-stale cached answer while one elected worker recomputes in the background. LLM answers tolerate mild staleness far better than latency spikes.
 
-**Exact cache key:** `llm:exact:{sha256(json_serialize({model, messages, temperature_bucket}))}`  
-Temperature is bucketed (0.0–0.3 → "low", 0.3–0.7 → "medium", 0.7–1.0 → "high") to prevent cache busting from minor temperature drift.
+### 9.7 On-Chain Event Cache Correctness
 
-**Semantic cache key:**  
-1. Normalize the goal/prompt: lowercase, remove punctuation, collapse whitespace
-2. Compute `text-embedding-3-small` embedding (1536 dimensions)
-3. Round embedding values to 3 decimal places (reduces noise)
-4. Compute SHA-256 of the rounded embedding JSON
-5. Before inserting: query pgvector `ORDER BY embedding <=> $1 LIMIT 1` — if cosine similarity > 0.97, reuse existing semantic cache entry
+Monad reorgs and indexer restarts re-deliver events. Two rules:
 
-**Cache TTLs:**
-- Deterministic system prompts: 24h
-- User-driven goal prompts: 6h (user may refine the same goal)
-- Tool-result analysis prompts: 12h
+1. **Idempotency set:** Key all processed events on `(tx_hash, log_index)`. Never process the same event twice regardless of delivery count.
+2. **Finality-keyed cache for write decisions:** For reads that drive a write-back (a reputation score you are about to submit on-chain), key the cache by `block_number` / finality tag, not wall-clock TTL. A 12s TTL can straddle a reorg. Wall-clock TTL is acceptable only for cosmetic reads (dashboard display, non-consequential queries).
 
-**Cache invalidation:**  
-No active invalidation — TTL expiry only. If a user explicitly retries a goal, a `X-Cache-Bypass: true` header can be sent to force a miss at all layers.
+### 9.8 Negative Caching
 
-### 9.4 Token Savings Estimate
+Cache failure responses with short TTLs to prevent retry storms:
 
-| Scenario | Without Cache | With Cache | Saving |
-|----------|-------------|-----------|--------|
-| Same PR automation goal run twice | 8,000 tokens | 0 tokens (exact hit) | 100% |
-| Similar PR automation for different repo | 8,000 tokens | ~500 tokens (semantic hit — only interpolation) | ~94% |
-| Repeated tool call (same GitHub file read) | N/A — API call | Redis cache hit | 100% (no LLM tokens) |
-| Agent plan for "common" goal type | 4,000 tokens (planning) | 0 tokens (plan cache hit) | 100% |
-| Overall estimated reduction on repeated workloads | — | — | 40–60% |
+| Failure Type | Cache TTL | Key Pattern |
+|-------------|----------|------------|
+| GitHub 404 | 5m | `tool:github_ops:404:{sha256(args)}` |
+| LLM 429 (rate limit) | Retry-After value | `llm:ratelimit:{provider}` |
+| Capability denied | 60s | `cap:denied:{agent_id}:{tool_name}` |
+| Empty web_search result | 30s | `tool:web_search:empty:{sha256(args)}` |
+
+Distinguish "empty result" (cacheable) from "error/timeout" (never cache — you would memoize a flaky upstream).
+
+### 9.9 Cross-Cutting Landmines
+
+**pgBouncer transaction mode:** pgBouncer in transaction mode recycles connections between transactions. This silently breaks:
+- PostgreSQL advisory locks (released when connection is returned to pool before your intent completes) — use Redis SET NX locks instead
+- LISTEN/NOTIFY (subscription is connection-bound, lost on pool recycle) — use Redis pub/sub instead
+- asyncpg prepared statement cache — set `statement_cache_size=0` in the asyncpg connection string (or use pgbouncer-aware mode) for AsyncPostgresSaver
+
+**LiteLLM fallback breaks prefix cache warmth:** See §9.5. Correlate provider-switch events with `cache_creation_input_tokens` spikes in observability to detect prefix cache thrashing.
+
+**Deploy-time cold start:** Versioned key rollout (§9.2) invalidates all caches simultaneously. The first request to each prompt pattern post-deploy pays full LLM cost. Mitigate with a pre-warm step in the deploy pipeline (replay top-20 goal types against the new key prefix before routing live traffic). Tracked as a Phase 5 operational runbook item.
+
+### 9.10 Caching Roadmap (Phase 5)
+
+- LangGraph node memoization: short-circuit deterministic, side-effect-free nodes whose input-state slice is unchanged between DAG iterations. Memoize by `hash(node_id + input_slice)`. Only temp=0 nodes. Big win on `self_heal_node` which re-runs the whole DAG.
+- Per-role TTL config table: move role→cache policy from code to a config file; enables tuning from usage data without a deploy.
+- API gateway response cache: short-lived moka cache for idempotent GETs (`GET /agents/{id}/passport` 60s, `GET /reputation/leaderboard` 30s, `GET /proofs/{task_id}` 300s if confirmed). SSE streams are never cached.
+- Cache observability: `llm_cache_hits_total{type}`, `llm_cache_misses_total{type}`, `llm_cache_tokens_saved_total`, `tool_cache_hits_total{tool_name}`. Target: >60% LLM cache hit rate. Alert on >80% Redis memory usage.
+- LLM-as-judge semantic promotion: mine the 0.90–0.97 similarity band offline; gate promotion on observed repeat-frequency; store promotions as alias→canonical pointers (revocable). Scope to Researcher/Writer only.
 
 ---
 
@@ -1006,8 +1096,17 @@ contract ProofOfWork is AccessControl {
     }
     // bytes32 taskId is the mapping key — not stored in struct (saves 1 slot)
 
-    mapping(bytes32 => Proof) public proofs;          // taskId → Proof
-    mapping(bytes32 => bytes32[]) public goalProofs;  // goalId → taskIds[]
+    struct BundleRecord {
+        bytes32 goalId;
+        bytes32 merkleRoot;
+        uint32  taskCount;
+        uint64  timestamp;
+        bool    recorded;
+    }
+
+    mapping(bytes32 => Proof)        public proofs;        // taskId → Proof
+    mapping(bytes32 => bytes32[])    public goalProofs;    // goalId → taskIds[]
+    mapping(bytes32 => BundleRecord) public bundles;       // bundleId → BundleRecord
 
     event ProofRecorded(
         bytes32 indexed taskId,
@@ -1017,6 +1116,15 @@ contract ProofOfWork is AccessControl {
         uint64 timestamp
     );
     event ProofVerified(bytes32 indexed taskId, address verifier);
+
+    // Bundle recording — one tx per goal (gas-efficient)
+    event BundleRecorded(
+        bytes32 indexed bundleId,
+        bytes32 indexed goalId,
+        bytes32          merkleRoot,
+        uint32           taskCount,
+        uint64           timestamp
+    );
 
     constructor(address _agentPassport) {
         agentPassport = IAgentPassport(_agentPassport);
@@ -1047,6 +1155,23 @@ contract ProofOfWork is AccessControl {
         emit ProofRecorded(taskId, goalId, agentAddress, resultHash, uint64(block.timestamp));
     }
 
+    function recordBundle(
+        bytes32 bundleId,
+        bytes32 goalId,
+        bytes32 merkleRoot,
+        uint32  taskCount
+    ) external onlyRole(RECORDER_ROLE) {
+        require(!bundles[bundleId].recorded, "Bundle already recorded");
+        bundles[bundleId] = BundleRecord({
+            goalId:     goalId,
+            merkleRoot: merkleRoot,
+            taskCount:  taskCount,
+            timestamp:  uint64(block.timestamp),
+            recorded:   true
+        });
+        emit BundleRecorded(bundleId, goalId, merkleRoot, taskCount, uint64(block.timestamp));
+    }
+
     function verifyProof(bytes32 taskId) external onlyRole(RECORDER_ROLE) {
         require(proofs[taskId].timestamp != 0, "ProofOfWork: proof not found");
         proofs[taskId].verified = true;
@@ -1058,6 +1183,8 @@ contract ProofOfWork is AccessControl {
     }
 }
 ```
+
+Individual task hashes stay in PostgreSQL. Anyone can verify by recomputing the Merkle tree from off-chain records and comparing the root to the on-chain `BundleRecorded` event. `recordProof` is retained as the single-task fallback for debugging and per-task idempotency guarantees.
 
 ### 10.4 ReputationRegistry.sol
 
@@ -1165,6 +1292,13 @@ contract AuditTrail is AccessControl {
         uint64           timestamp
     );
 
+    // Batched write — indexer drains stream:audit_buffer every 10s
+    event ActionBatchLogged(
+        bytes32 indexed merkleRoot,
+        uint32          count,
+        uint64          timestamp
+    );
+
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
@@ -1177,10 +1311,17 @@ contract AuditTrail is AccessControl {
     ) external onlyRole(WRITER_ROLE) {
         emit ActionLogged(agentId, actionType, payloadHash, uint64(block.timestamp));
     }
+
+    function logBatch(
+        bytes32 merkleRoot,
+        uint32  count
+    ) external onlyRole(WRITER_ROLE) {
+        emit ActionBatchLogged(merkleRoot, count, uint64(block.timestamp));
+    }
 }
 ```
 
-**Gas cost:** ~21,000 base + ~750 per indexed topic + ~8 per byte of non-indexed data ≈ ~24,000 gas per audit log entry. On Monad testnet with 10,000+ TPS, this is negligible.
+**Gas cost:** ~21,000 base + ~750 per indexed topic + ~8 per byte of non-indexed data ≈ ~24,000 gas per audit log entry. On Monad testnet with 10,000+ TPS, this is negligible. `logBatch` amortizes this cost across hundreds of actions per tx — the indexer drains `stream:audit_buffer` every 10 seconds, builds the Merkle tree off-chain, and emits a single `ActionBatchLogged` event. Off-chain reconstruction: client pulls the action JSON list for a batch from `/audit/batches/{merkleRoot}`, rebuilds the Merkle tree, and compares the root to the on-chain event. Tamper-evidence is preserved. The single-action `log()` / `ActionLogged` path is retained as the fallback for debugging.
 
 ### 10.6 Deployment Script
 
@@ -1310,7 +1451,7 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledGraph:
     graph.add_node("integrator",          integrator_node)
     graph.add_node("replan",              replan_node)
     graph.add_node("self_heal",           self_heal_node)
-    graph.add_node("submit_proofs",       submit_proofs_node)
+    graph.add_node("enqueue_proofs",      enqueue_proofs_node)
     graph.add_node("finalize",            finalize_node)
 
     # Entry point
@@ -1323,8 +1464,8 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledGraph:
     # dag_router uses Send API for parallel execution
     graph.add_conditional_edges(
         "dag_router",
-        route_tasks,           # returns list of Send() objects or "submit_proofs"
-        {"submit_proofs": "submit_proofs", "__dynamic__": None}
+        route_tasks,           # returns list of Send() objects or "enqueue_proofs"
+        {"enqueue_proofs": "enqueue_proofs", "__dynamic__": None}
     )
 
     # All agent nodes → dag_router (check for next ready tasks)
@@ -1335,10 +1476,10 @@ def build_graph(checkpointer: AsyncPostgresSaver) -> CompiledGraph:
             {"dag_router": "dag_router", "replan": "replan", "self_heal": "self_heal"}
         )
 
-    graph.add_edge("replan",        "dag_router")
-    graph.add_edge("self_heal",     "finalize")
-    graph.add_edge("submit_proofs", "finalize")
-    graph.add_edge("finalize",      END)
+    graph.add_edge("replan",         "dag_router")
+    graph.add_edge("self_heal",      "finalize")
+    graph.add_edge("enqueue_proofs", "finalize")
+    graph.add_edge("finalize",       END)
 
     return graph.compile(checkpointer=checkpointer)
 ```
@@ -1374,9 +1515,9 @@ async def plan_node(state: AgentState) -> dict:
 from langgraph.types import Send
 
 def route_tasks(state: AgentState):
-    # Check if all tasks done → proceed to proof submission
+    # Check if all tasks done → proceed to proof enqueueing
     if all(t["status"] in ("done", "failed") for t in state["tasks"]):
-        return "submit_proofs"
+        return "enqueue_proofs"
 
     # Find tasks with all dependencies completed
     completed_ids = {t["id"] for t in state["tasks"] if t["status"] == "done"}
@@ -1388,7 +1529,7 @@ def route_tasks(state: AgentState):
 
     if not ready:
         # No ready tasks but not all done → waiting (shouldn't happen in correct DAG)
-        return "submit_proofs"
+        return "enqueue_proofs"
 
     # Fan out in parallel via Send API
     return [Send(t["agent_role"], {**state, "current_task_id": t["id"]}) for t in ready]
@@ -1435,6 +1576,40 @@ async def integrator_node(state: AgentState) -> dict:
     result_hash = sha256_json(result)
     return update_task_result(state, task["id"], result, result_hash)
 ```
+
+**enqueue_proofs_node** — non-blocking proof submission via outbox + Redis Stream
+```python
+async def enqueue_proofs_node(state: GraphState) -> GraphState:
+    """Non-blocking: XADD to stream:proof_queue, do not wait for chain confirmation."""
+    for task in state["completed_tasks"]:
+        result_hash = hashlib.sha256(
+            json.dumps(task["result"], sort_keys=True).encode()
+        ).hexdigest()
+        # Write outbox record first (durability)
+        await db.execute(
+            """INSERT INTO proof_outbox (task_id, goal_id, agent_address, result_hash, status)
+               VALUES ($1, $2, $3, $4, 'pending')
+               ON CONFLICT (task_id) DO NOTHING""",
+            task["id"], state["goal_id"], task["agent_address"], result_hash
+        )
+        # Non-blocking enqueue
+        await redis.xadd("stream:proof_queue", {
+            "task_id":       task["id"],
+            "goal_id":       state["goal_id"],
+            "agent_address": task["agent_address"],
+            "result_hash":   result_hash,
+            "bundle_id":     state["goal_id"],  # one bundle per goal
+        })
+    # Publish proof.pending SSE event
+    await redis.xadd(f"stream:goal:{state['goal_id']}", {
+        "event": "proof.pending",
+        "goal_id": state["goal_id"],
+        "task_count": len(state["completed_tasks"]),
+    })
+    return state
+```
+
+The `blockchain-indexer` consumes `stream:proof_queue` independently, batches task hashes per `bundle_id` (goal), computes the Merkle root, and calls `ProofOfWork.recordBundle` — one transaction per goal. The graph node returns immediately without blocking on chain confirmation, keeping goal latency decoupled from Monad block time.
 
 ### 11.4 Checkpoint Strategy
 
@@ -1592,17 +1767,19 @@ Key rotation, role grants, or emergency pausing require 2-of-3 signatures. This 
 - Rate limiting per `{user_id}:{endpoint}` via Redis sliding window
 - Input validation via Pydantic (Python) and serde/validator (Rust) at every service boundary
 - No user-supplied data is passed to shell commands (code execution runs in isolated sandbox container with no network and no file system mount)
-- mTLS between all internal services — external traffic cannot reach internal services even if the private Docker network is exposed
+- **Internal Auth (Phases 1–4):** All internal service-to-service calls include `X-Internal-Auth: hex(hmac_sha256(service_secret, request_body))`. The Docker private network prevents external access; HMAC prevents in-network spoofing. Secrets rotated at each deploy via environment injection.
+- **Internal Auth (Phase 5+):** mTLS via cert-manager in Kubernetes. Mechanical swap — the HMAC header is removed and replaced with mutual certificate verification. No application logic changes required.
 
 ### 13.3 Capability-Based Access Control
 
-Every tool call is gated by the identity service's capability check:
+Tool servers verify capabilities locally using the capability JWT issued by accounts-service at agent registration:
 ```
-agent requests tool call
-    → gRPC VerifyCapability(agent_id, tool_name)
-    → identity service checks capabilities JSON
-    → returns allowed=true/false with reason
-    → tool server rejects if allowed=false
+1. Extract Bearer JWT from X-Capability-JWT request header
+2. Verify HS256 signature using accounts-service public key (cached in moka, TTL 5m)
+3. Check capabilities[] claim includes the requested tool_name and action scope
+4. Check exp — reject if expired (force re-fetch from accounts-service)
+5. Check cap:revoked:{agent_id} Redis key — if set, reject with 403 CAPABILITY_REVOKED
+No network hop to accounts-service on the hot path. Revocation takes effect within seconds via Redis pub/sub.
 ```
 
 Capabilities are set at agent registration and can be updated via authenticated `PATCH /agents/{id}/capabilities`. Changes to capabilities update the `capabilityHash` in PostgreSQL but do **not** automatically update the on-chain hash (the blockchain records the capability hash at registration time — this is intentional for auditability of what the agent was authorized to do at any point in time).
@@ -2010,7 +2187,7 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 - GitHub repo setup: branch protection on `main`, CODEOWNERS, PR template, dependabot, CI pipeline skeletons
 - `scripts/setup-dev.sh`: one-command bootstrap (checks dependencies, starts compose, runs migrations)
 
-**Success criteria:** `./scripts/setup-dev.sh` runs to completion. All 5 service `Cargo.toml` files compile clean. `docker compose up` brings up PostgreSQL, Redis, and observability stack.
+**Success criteria:** `./scripts/setup-dev.sh` runs to completion. All 4 services (api-gateway, orchestration, accounts-service, blockchain-indexer) `Cargo.toml` files compile clean. `docker compose up` brings up PostgreSQL, Redis, and observability stack.
 
 **Estimated effort:** 2–3 dev-days  
 **Dependencies:** None — this phase unblocks all subsequent work.
@@ -2018,8 +2195,6 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 ---
 
 ### Phase 1 — Core Agent Execution (Days 4–10)
-
-**Goal:** End-to-end goal submission and agent execution with LangGraph.
 
 **Deliverables:**
 - `services/api-gateway/`: JWT middleware, Redis rate limiter, SSE multiplexer subscribing to Redis Streams, routing to orchestration/identity/reputation, health endpoint
@@ -2034,7 +2209,7 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 
 **Success criteria:** Submit "Write a summary of the README for repo X" → agents complete → result returned via API. SSE stream delivers task events in real time. LLM cache hit on second identical goal.
 
-**Estimated effort:** 5–6 dev-days  
+**Estimated effort:** 5–6 dev-days
 **Dependencies:** Phase 0 complete; PostgreSQL and Redis running.
 
 ---
@@ -2054,7 +2229,7 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 
 **Success criteria:** Register an agent → passport NFT visible on `testnet.monadexplorer.com`. Complete a goal → `ProofOfWork.proofs[taskId]` on-chain matches `SHA-256(result_json)`. `AuditTrail` events appear in block explorer for every tool call.
 
-**Estimated effort:** 6–7 dev-days  
+**Estimated effort:** 6–7 dev-days
 **Dependencies:** Phase 1 complete; Monad testnet wallets funded with sufficient MON.
 
 ---
@@ -2073,7 +2248,7 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 
 **Success criteria:** Complete 5 consecutive goals → badge issued and visible on-chain. Score visible in `ReputationRegistry` on block explorer. `mergit verify-score` passes for any agent. Leaderboard updates within 10 minutes of completed goal.
 
-**Estimated effort:** 4–5 dev-days  
+**Estimated effort:** 4–5 dev-days
 **Dependencies:** Phase 2 complete (requires ProofOfWork events to flow into PostgreSQL).
 
 ---
@@ -2101,7 +2276,7 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 
 **Success criteria:** Submit goal from UI → see live task events in SSE feed → approve PR interrupt from modal → see proof tx hash with explorer link. Wallet connects to Monad testnet. Leaderboard displays agent scores.
 
-**Estimated effort:** 4–5 dev-days (structure + wiring) + additional effort for design implementation  
+**Estimated effort:** 4–5 dev-days (structure + wiring) + additional effort for design implementation
 **Dependencies:** Phase 1 (SSE/API), Phase 3 (reputation/badge data).
 
 ---
@@ -2113,20 +2288,11 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 **Deliverables:**
 - Kubernetes manifests (`infra/k8s/`): Deployments, Services, HPA (CPU 70% threshold, min 2 / max 10), PDB (minAvailable: 1), ResourceQuotas
 - OpenTelemetry SDK in all Rust services and Python orchestration → Grafana Tempo
-- Prometheus scrape endpoints in all Rust services → dashboards:
-  - API gateway: p50/p95/p99 latency, error rate, SSE client count
-  - Orchestration: active goals, LLM cache hit rate, interrupt queue depth
-  - Blockchain-indexer: chain sync lag, TX submission latency, oracle key balance
-  - Reputation: score update batch duration, leaderboard write latency
+- Prometheus scrape endpoints in all Rust services → dashboards: API gateway (p50/p95/p99 latency, error rate, SSE client count), Orchestration (active goals, LLM cache hit rate, interrupt queue depth), Blockchain-indexer (chain sync lag, TX submission latency, oracle key balance), Reputation (score update batch duration, leaderboard write latency)
 - HashiCorp Vault integration: oracle keystore, API keys, DB credentials (replaces Docker secrets)
 - `k6` load tests: 100 concurrent goal submissions, 1000 concurrent SSE clients
 - Gnosis Safe 2-of-3 multi-sig setup for oracle key rotation capability
-- Mainnet deployment checklist:
-  - [ ] Contract audit (external or internal)
-  - [ ] Gas estimation at 10x current load
-  - [ ] Upgrade RPC to QuickNode paid tier (rate limits for WSS subscription)
-  - [ ] Update `deployments/143.json` (mainnet chain ID)
-  - [ ] Rotate all testnet keys, provision fresh mainnet keys in Vault
+- Mainnet deployment checklist: contract audit, gas estimation at 10x load, QuickNode paid RPC upgrade, `deployments/143.json` update, key rotation into Vault
 
 **Estimated effort:** 8–10 dev-days (ongoing, parallelizable with user onboarding)
 
@@ -2146,6 +2312,12 @@ JWT_SECRET=...                 # HS256 secret for agent tokens
 | 8 | Multi-agent coordination: can multiple agent instances share the same DID? | **Decided** | No — one DID per agent instance. Parallel task execution within a single LangGraph thread does not create multiple DIDs |
 | 9 | `spawn_goal` tool: should child goals have their own DID or inherit parent's? | **Open** | Lean toward inheriting parent's DID with a child-goal tag in the proof — simpler identity model |
 | 10 | GitHub webhook authentication: HMAC-SHA256 signature validation | **Decided** | Required from day 1 in `tool-server-github`; reject all unverified webhooks |
+| 11 | Merge identity + reputation into accounts-service (Python/FastAPI) | **Decided** | Both services are I/O-bound, no independent scaling pressure; reduces Cargo crates, Docker images, CI lanes. Promote to standalone in Phase 5 if needed. |
+| 12 | Non-blocking enqueue_proofs_node via stream:proof_queue | **Decided** | Blocking on chain confirmation added 5-10s to goal completion; async enqueue + proof-worker separates concerns |
+| 13 | Batch audit logging: stream:audit_buffer + 10s Merkle ticker | **Decided** | Synchronous per-call LogAction serialized on indexer nonce ordering, adding latency per tool call |
+| 14 | Capability JWT for local verification at tool servers | **Decided** | Eliminates per-call RPC to identity service; cap:revoked pub/sub provides near-instant revocation |
+| 15 | Keep gRPC (tonic) on blockchain-indexer UpdateScore path; drop elsewhere | **Decided** | UpdateScore is a batch job (10-min interval), gRPC justified for Protobuf encoding + HTTP/2; all other internal calls use HTTP/JSON |
+| 16 | HMAC X-Internal-Auth for Phases 1–4; mTLS deferred to Phase 5 | **Decided** | mTLS cert rotation setup consumes 2-3 days of Phase 1-2 budget inside a private Docker network with equivalent security |
 
 ---
 
