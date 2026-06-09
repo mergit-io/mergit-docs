@@ -55,6 +55,39 @@ Conventional commit prefixes: `feat`, `fix`, `chore`, `contracts`, `infra`.
 
 Contract changes (`contracts/` and `services/blockchain-indexer/`) require `@mergit-io/contracts-reviewers` approval. Always run `slither` and include gas diff in the PR description.
 
+## Repository Structure (Decided 2026-06-03)
+
+Three repos under `mergit-io`. Do not deviate without strong justification.
+
+| Repo | Contents | License |
+|------|----------|---------|
+| `mergit-io/mergit` | Backend monorepo: all services + frontend + migrations + infra + CI/CD | AGPL-3.0 |
+| `mergit-io/mergit-contracts` | Solidity contracts only (Foundry) | MIT |
+| `mergit-io/mergit-docs` | This repo — PRD, architecture decisions | CC BY 4.0 |
+
+**Key rules:**
+- DB migrations always stay inside `mergit` alongside the services that own the schema — never a separate repo
+- Frontend stays in `mergit` until a dedicated frontend team is hired
+- Do not create per-service repos; split only when team growth creates real friction
+- Contracts are separate from day 1 due to security, audit, and independent deployment requirements
+
+**Service naming (follow PRD §6.1, not older CLAUDE.md table):**
+- `accounts-service` — single Python/FastAPI service containing both identity module (DID, NFT) and reputation module (scoring, badges). The older table listing `identity` and `reputation` as separate Rust services is outdated.
+
+**Licensing rationale:**
+- AGPL-3.0 on backend: closes the SaaS loophole — anyone hosting Mergit as a service must open-source their changes
+- MIT on contracts: standard expectation for smart contracts; auditors and integrators require it
+- CC BY 4.0 on docs: standard for documentation
+
+## Next Steps (Phase 0)
+
+1. Create `mergit-io/mergit` on GitHub (AGPL-3.0)
+2. Create `mergit-io/mergit-contracts` on GitHub (MIT)
+3. Set branch protection on both: `main` requires 2 approvals + linear history + CI green; `develop` requires CI green
+4. Add CODEOWNERS to `mergit`: `contracts/ @mergit-io/contracts-reviewers`, `services/blockchain-indexer/ @mergit-io/contracts-reviewers`
+5. Scaffold full directory structure in `mergit` (service stubs, Cargo workspace, uv workspace, Docker Compose, all DB migrations, CI/CD workflow files)
+6. Get all CI workflows green on stubs before writing service code
+
 ## Environment Variables
 
 All secrets live in `.env` (gitignored). After contract deployment, addresses go into `deployments/{chain_id}.json` (committed). Key env vars: `MONAD_RPC_HTTP`, `MONAD_RPC_WSS`, `MONAD_CHAIN_ID`, contract addresses, `ORACLE_KEYSTORE_PATH`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `GITHUB_TOKEN`, `POSTGRES_PASSWORD`, `JWT_SECRET`. The oracle signing key is loaded from an encrypted Foundry keystore — never stored as plaintext.
